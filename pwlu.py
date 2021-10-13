@@ -1,7 +1,7 @@
 '''
 Daniel Monroe, 2021
 Implementation of paper
-"Piecewise Linear Unit (PWLU) Activation Function"
+"Learning specialized activation functions with the Piecewise Linear Unit"
  https://arxiv.org/pdf/2104.03693.pdf
 
 Trainable boundaries are foregone in place of batch norms.
