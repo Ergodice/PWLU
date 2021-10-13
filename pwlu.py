@@ -1,11 +1,12 @@
 '''
 Daniel Monroe, 2021
-Implementation of paper:
+Implementation of paper
 "Piecewise Linear Unit (PWLU) Activation Function"
-Trainable boundaries are foregone in place of batch norms
-To simplify the implementation, there are fixed boundaries (recommended, 2.5-3.00) which are the same for all channels
-Instead of training slopes, we consider the regions outside of the boundaries to be extensions of the outermost regions
  https://arxiv.org/pdf/2104.03693.pdf
+
+Trainable boundaries are foregone in place of batch norms.
+To simplify the implementation, there are fixed boundaries which are the same for all channels.
+Instead of training slopes, we consider the regions outside of the boundaries to be extensions of the outermost regions.
 '''
 
 
@@ -115,6 +116,7 @@ class PWLUBase(torch.nn.Module, abc.ABC):
         :param init: function to initialize the points
         :param norm: normalization layer, defaults to BatchNorm2d
         :param norm_args: arguments to pass to norm
+        :param kwargs: other arguments, will raise exception if not empty
         '''
 
         super().__init__()
@@ -205,14 +207,14 @@ class PWLU(PWLUBase):
     '''
     Vanilla implementation of the PWLU.
     The PWLU is initialized as channelwise if n_channels is specified; otherwise, it is layerwise.
-    See PWLUBase for a list of other parameters.
+    Other parameters are pased to PWLUBase.
     '''
     def __init__(self,
                  n_channels: int=None,
                  **kwargs):
         '''
         :param n_channels: number of channels in input, defaults to None
-        :param channelwise: whether to use channelwise PWLU, defaults to False
+        :param kwards: see PWLUBase
         '''
         self._n_channels = n_channels
         super().__init__(**kwargs)
@@ -242,6 +244,7 @@ class RegularizedPWLU(PWLUBase):
     The regularized PWLU is a a stable version of the channelwise PWLU meant for smaller networks.
     It is channelwise by definition and has a "master points" parameter which is the average of the other channel units
     and "deviation points" parameters which are the deviations from the master points, controlled in their strength by the relative_factor parameter.
+    Other parameters are pased to PWLUBase.
     '''
     def __init__(self,
                  n_channels: int,
@@ -251,6 +254,7 @@ class RegularizedPWLU(PWLUBase):
         '''
         :param n_channels: number of channels in input
         :param relative_factor: how much to scale the relative point deviations by
+        :param kwargs: see PWLUBase
         '''
         
         self._n_channels = n_channels
@@ -277,5 +281,13 @@ class RegularizedPWLU(PWLUBase):
         self.normalize_points()
 
 
-def normed_pwlu(pwlu_class: type, *args, norm: nn.Module, norm_args: dict={},  **kwargs) -> PWLUBase:
+def normed_pwlu(pwlu_class: type, *args, norm: nn.Module, norm_args: dict={}, **kwargs) -> PWLUBase:
+    '''
+    Make a PWLU with a normalization layer.
+    :param pwlu_class: PWLU class to instantiate
+    :param args: positional arguments to pass to PWLU class, usually just num channels
+    :param norm: normalization layer
+    :param norm_args: arguments to pass to normalization layer
+    :param kwargs: keyword arguments to pass to PWLU class
+    '''
     return pwlu_class(*args, norm=norm, norm_args=norm_args, **kwargs)
