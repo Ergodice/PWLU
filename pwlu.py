@@ -4,7 +4,8 @@ Implementation of paper
 "Piecewise Linear Unit (PWLU) Activation Function"
  https://arxiv.org/pdf/2104.03693.pdf
 
-Batch norms supplement optional trainable boundaries.
+Trainable boundaries are foregone in place of batch norms.
+To simplify the implementation, there are fixed boundaries which are the same for all channels.
 Instead of training slopes, we consider the regions outside of the boundaries to be extensions of the outermost regions.
 '''
 
@@ -34,6 +35,9 @@ def normalize(points: torch.Tensor, fix_std: bool = True) -> None:
             if fix_std:
                 nn.functional.normalize(points, dim=0, out=points)
             points -= torch.mean(points)
+
+
+# @torch.jit.script
 
 
 def pwlu_forward(x: torch.Tensor, points: torch.Tensor, bounds: torch.Tensor) -> torch.Tensor:
@@ -108,11 +112,11 @@ def pwlu_forward(x: torch.Tensor, points: torch.Tensor, bounds: torch.Tensor) ->
 class PWLUBase(torch.nn.Module, abc.ABC):
     '''
     Abstract base class for PWLU
-    Accepts n_regions, bound, learnable_bound, same_bound, init, norm, and norm_args arguments to be passed in from child class
+    Accepts n_regions, bound, init, norm, and norm_args arguments to be passed in from child class
     '''
 
     def __init__(self,
-                 n_regions: int = 6,
+                 n_regions: int = 12,
                  bound: float = 2.5,
                  learnable_bound: bool = False,
                  same_bound: bool = False,
@@ -151,13 +155,15 @@ class PWLUBase(torch.nn.Module, abc.ABC):
         self._n_points = n_regions + 1
         self.set_points(get_activation(init))
 
-        # Create normalization layer'
+        # Create normalization layer
         self._norm = None
         if normed:
             self._norm = nn.LazyBatchNorm2d(affine=False, **norm_args)
 
-    def forward(self, x: torch.Tensor):
-        return pwlu_forward(self._norm(x) if self._norm else x, self.get_points(), self._bounds)
+    def forward(self, x: torch.Tensor, use_norm=True):
+        if use_norm and self._norm(x) is not None:
+            x = self._norm(x)
+        return pwlu_forward(x, self.get_points(), self._bounds)
 
     def __repr__(self):
         ret = f'{self.__class__}(n_regions={self._n_regions}, bound={self._bounds})'
@@ -165,10 +171,10 @@ class PWLUBase(torch.nn.Module, abc.ABC):
             ret += f'n_channels={self._n_channels}'
         return ret
 
-    def get_plottable(self, n_points: int = 100, bound: float = 4) -> torch.Tensor:
+    def get_plottable(self, n_points: int = 100, bound: float = 3) -> torch.Tensor:
         '''
         :param n_points: number of points to plot
-        :param bound: bound to plot, defaults to self.bound
+        :param bound: bound to plot, defaults to 3
         '''
         self.normalize_points()
 
@@ -177,9 +183,9 @@ class PWLUBase(torch.nn.Module, abc.ABC):
             locs = locs.repeat(self._n_channels, 1)
         with torch.no_grad():
             try:
-                vals = self.forward(torch.from_numpy(locs).cuda())
+                vals = self.forward(torch.from_numpy(locs).cuda(), use_norm=False)
             except:
-                vals = self.forward(torch.from_numpy(locs))
+                vals = self.forward(torch.from_numpy(locs), use_norm=False)
         vals = vals.cpu().numpy()
         return locs.squeeze(), vals.squeeze()
 
