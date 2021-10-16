@@ -1,12 +1,10 @@
 '''
 Daniel Monroe, 2021
 Implementation of paper
-"Piecewise Linear Unit (PWLU) Activation Function"
- https://arxiv.org/pdf/2104.03693.pdf
+"Learning specialized activation functions with the Piecewise Linear Unit"
+https://arxiv.org/pdf/2104.03693.pdf
 
-Trainable boundaries are foregone in place of batch norms.
-To simplify the implementation, there are fixed boundaries which are the same for all channels.
-Instead of training slopes, we consider the regions outside of the boundaries to be extensions of the outermost regions.
+The implementation is exactly the same as the original
 '''
 
 from utils import *
@@ -38,35 +36,48 @@ def normalize(points: torch.Tensor, fix_std: bool = True) -> None:
 
 
 # @torch.jit.script
-
-
-def pwlu_forward(x: torch.Tensor, points: torch.Tensor, bounds: torch.Tensor) -> torch.Tensor:
+def pwlu_forward(x: torch.Tensor, points: torch.Tensor, bounds: torch.Tensor, left_slopes: torch.Tensor,
+                 right_slopes: torch.Tensor) -> torch.Tensor:
     '''
     Apply PWLU activation function to x with points and bound
     :param x: input
     :param points: points to evaluate PWLU at
     :param bounds: bounds of PWLU
+    :param left_slopes: left slopes of PWLU
+    :param right_slopes: right slopes of PWLU
     '''
 
     channelwise = len(points.shape) == 2
-    n_regions = points.shape[1 if channelwise else 0] - 1
+    n_points = points.shape[-1]
+    n_regions = n_points - 1
+    left_bounds = bounds[..., 0]
+    right_bounds = bounds[..., 1]
+
+    region_lengths = right_bounds - left_bounds
+
     batch_size, n_channels, *other_dims = x.shape
 
-    # values for bounds will be mapped to 0 and 1, some will lie outside
+    # Compute slopes
+    slopes = (points - torch.roll(points, 1, dims=-1))[..., 1:] / region_lengths.unsqueeze(-1)
+    slopes = torch.cat([left_slopes.unsqueeze(-1), slopes, right_slopes.unsqueeze(-1)], dim=-1)
+    sim_left_bounds = left_bounds - region_lengths
+
+    # values for bounds will be mapped to 0 (sim_left_bound) and 1 (right bound), some will lie outside
     if channelwise:
         if len(bounds.shape) == 1:
-            x_normal = ((x - bounds[0]) / (bounds[1] - bounds[0])).moveaxis(1, 0)
+            x_normal = ((x - sim_left_bounds) / ((n_regions + 1) * region_lengths)).moveaxis(1, 0)
         else:
             x_channels_last = x.moveaxis(1, -1)
-            x_normal = ((x_channels_last - bounds[..., 0]) / (bounds[..., 1] - bounds[..., 0])).moveaxis(-1, 0)
+            x_normal = (x_channels_last - sim_left_bounds) / ((n_regions + 1) * region_lengths)
+            x_normal = x_normal.moveaxis(-1, 0)
     else:
-        x_normal = (x - bounds[0]) / (bounds[1] - bounds[0])
+        x_normal = (x - sim_left_bounds) / ((n_regions + 1) * region_lengths)
 
-    # regions from 0 to self.n_regions - 1 that values belong in
-    regions = (x_normal.clamp(0, .999) * n_regions).floor()
+    # regions are 0, 1... n_regions, n_regions + 1; outermost are out of bounds
+    regions = (x_normal.clamp(0, 1.001) * (n_regions + 1)).floor()
 
     # create tensor of PWLU regions into shape (channels, ...) if channelwise else (...)
-    dists = x_normal * n_regions - regions
+    dists = x_normal * (n_regions + 1) - regions
 
     regions_packed = regions.long()
     if channelwise:
@@ -74,23 +85,22 @@ def pwlu_forward(x: torch.Tensor, points: torch.Tensor, bounds: torch.Tensor) ->
     else:
         regions_packed = regions_packed.reshape(-1)
 
-    # create tensors of left and right points of regions
-    left_points = torch.gather(points, -1, regions_packed)
-    right_points = torch.gather(points, -1, regions_packed + 1)
+    # create tensors of left points and slopes
+    false_points = torch.cat([(points[..., 0] - left_slopes * region_lengths).unsqueeze(-1), points], dim=-1)
+    left_points = torch.gather(false_points, -1, regions_packed)
+    slopes = torch.gather(slopes, -1, regions_packed)
+
     if channelwise:
         left_points = left_points.reshape(n_channels, batch_size, *other_dims)
-        right_points = right_points.reshape(n_channels, batch_size, *other_dims)
+        slopes = slopes.reshape(n_channels, batch_size, *other_dims)
 
-        left_points = left_points.moveaxis(0, 1)
-        right_points = right_points.moveaxis(0, 1)
-        dists = dists.moveaxis(0, 1)
+        ret = left_points + dists * slopes
+        ret = ret.moveaxis(0, 1)
 
     else:
         left_points = left_points.reshape(x.size())
-        right_points = right_points.reshape(x.size())
-
-    # calculate activation
-    ret = left_points * (1 - dists) + right_points * dists
+        slopes = slopes.reshape(x.size())
+        ret = left_points + dists * slopes
 
     '''
     # Second order pwlu
@@ -112,11 +122,13 @@ def pwlu_forward(x: torch.Tensor, points: torch.Tensor, bounds: torch.Tensor) ->
 class PWLUBase(torch.nn.Module, abc.ABC):
     '''
     Abstract base class for PWLU
-    Accepts n_regions, bound, init, norm, and norm_args arguments to be passed in from child class
+    The number of regions represents the number of regions inside the bounds.
+    There are always parameters for controlling slopes outside bounds.
+    Accepts n_regions, bound, learnable_bound, same_bound, init, norm, and norm_args arguments to be passed in from child class
     '''
 
     def __init__(self,
-                 n_regions: int = 12,
+                 n_regions: int = 6,
                  bound: float = 2.5,
                  learnable_bound: bool = False,
                  same_bound: bool = False,
@@ -155,15 +167,14 @@ class PWLUBase(torch.nn.Module, abc.ABC):
         self._n_points = n_regions + 1
         self.set_points(get_activation(init))
 
-        # Create normalization layer
+        # Create normalization layer'
         self._norm = None
         if normed:
             self._norm = nn.LazyBatchNorm2d(affine=False, **norm_args)
 
-    def forward(self, x: torch.Tensor, use_norm=True):
-        if use_norm and self._norm(x) is not None:
-            x = self._norm(x)
-        return pwlu_forward(x, self.get_points(), self._bounds)
+    def forward(self, x: torch.Tensor):
+        return pwlu_forward(self._norm(x) if self._norm else x, self.get_points(), self._bounds, self._left_slopes,
+                            self._right_slopes)
 
     def __repr__(self):
         ret = f'{self.__class__}(n_regions={self._n_regions}, bound={self._bounds})'
@@ -171,22 +182,26 @@ class PWLUBase(torch.nn.Module, abc.ABC):
             ret += f'n_channels={self._n_channels}'
         return ret
 
-    def get_plottable(self, n_points: int = 100, bound: float = 3) -> torch.Tensor:
+    def get_plottable(self, n_points: int = 100, bound: float = 4) -> torch.Tensor:
         '''
         :param n_points: number of points to plot
-        :param bound: bound to plot, defaults to 3
+        :param bound: bound to plot, defaults to self.bound
         '''
         self.normalize_points()
 
         locs = np.linspace(-bound, bound, n_points)[np.newaxis, np.newaxis, :]
         if self.channelwise:
             locs = locs.repeat(self._n_channels, 1)
-        with torch.no_grad():
-            try:
-                vals = self.forward(torch.from_numpy(locs).cuda(), use_norm=False)
-            except:
-                vals = self.forward(torch.from_numpy(locs), use_norm=False)
-        vals = vals.cpu().numpy()
+
+        locs = torch.from_numpy(locs)
+
+        try:
+            vals = self.forward(locs.cuda())
+        except:
+            vals = self.forward(locs.cpu())
+
+        vals = vals.detach().cpu().numpy()
+        locs = locs.cpu().numpy()
         return locs.squeeze(), vals.squeeze()
 
     def n_channels(self) -> int:
@@ -247,7 +262,7 @@ class PWLU(PWLUBase):
         self.set_points(self._init)
 
     def forward(self, x: torch.Tensor):
-        return pwlu_forward(x, self._points, self._bounds)
+        return pwlu_forward(x, self._points, self._bounds, self._left_slopes, self._right_slopes)
 
     def normalize_points(self) -> None:
         normalize(self._points)
@@ -255,10 +270,17 @@ class PWLU(PWLUBase):
     def set_points(self, init) -> None:
         self._init = init
         bound = torch.flatten(self._bounds)[0].item()
-        locs = torch.linspace(-bound, bound, self._n_points)
+        spacing = 2 * bound / (self._n_regions)
+
+        bound *= (1 + 2 / self._n_regions)
+        locs = torch.linspace(-bound, bound, self._n_points + 2)
         if self.channelwise:
             locs = locs.repeat(self._n_channels, 1)
-        self._points = Parameter(init(locs))
+        points = init(locs)
+
+        self._left_slopes = Parameter((points[..., 1] - points[..., 0]) / spacing)
+        self._right_slopes = Parameter((points[..., -1] - points[..., -2]) / spacing)
+        self._points = Parameter(points[..., 1:-1])
         self.normalize_points()
 
     def get_points(self) -> torch.Tensor:
@@ -300,13 +322,23 @@ class RegularizedPWLU(PWLUBase):
 
     def set_points(self, init) -> None:
         self._init = init
+        bound = torch.flatten(self._bounds)[0].item()
+        spacing = 2 * bound / (self._n_regions)
+
+        bound *= (1 + 2 / self._n_regions)
+        master_locs = torch.linspace(-bound, bound, self._n_points + 2)
+        master_locs = master_locs.repeat(self._n_channels, 1)
+        points = init(master_locs)
+
+        self._left_slopes = Parameter((points[..., 1] - points[..., 0]) / spacing)
+        self._right_slopes = Parameter((points[..., -1] - points[..., -2]) / spacing)
+        self._master_points = Parameter(points[..., 1:-1])
+
+        self._relative_points = Parameter(torch.zeros(self._n_channels, self._n_points))
+        self.normalize_points()
 
         bound = torch.flatten(self._bounds)[0].item()
-        master_locs, locs = (torch.linspace(-bound, bound, self._n_points) for _ in range(2))
-        locs = locs.repeat(self._n_channels, 1)
-        with torch.no_grad():
-            self._master_points = Parameter(init(master_locs))
-            self._relative_points = Parameter(torch.zeros_like(locs))
+
         self.normalize_points()
 
 
@@ -332,6 +364,8 @@ if __name__ == '__main__':
     for kwargs in args:
         pwlu = PWLU(**kwargs)
         assert pwlu(torch.zeros(3, 10, 17, 19)).shape == torch.Size([3, 10, 17, 19])
+        pwlu.get_plottable()
 
     pwlu = RegularizedPWLU(10, learnable_bound=True)
+    pwlu.get_plottable()
     assert pwlu(torch.zeros(3, 10, 17, 19)).shape == torch.Size([3, 10, 17, 19])
