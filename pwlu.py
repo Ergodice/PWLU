@@ -53,7 +53,7 @@ def pwlu_forward(x: torch.Tensor, points: torch.Tensor, bounds: torch.Tensor, le
     left_bounds = bounds[..., 0]
     right_bounds = bounds[..., 1]
 
-    region_lengths = right_bounds - left_bounds
+    region_lengths = (right_bounds - left_bounds) / n_regions
 
     batch_size, n_channels, *other_dims = x.shape
 
@@ -65,7 +65,8 @@ def pwlu_forward(x: torch.Tensor, points: torch.Tensor, bounds: torch.Tensor, le
     # values for bounds will be mapped to 0 (sim_left_bound) and 1 (right bound), some will lie outside
     if channelwise:
         if len(bounds.shape) == 1:
-            x_normal = ((x - sim_left_bounds) / ((n_regions + 1) * region_lengths)).moveaxis(1, 0)
+            x_normal = (x - sim_left_bounds) / ((n_regions + 1) * region_lengths)
+            x_normal.moveaxis(1, 0)
         else:
             x_channels_last = x.moveaxis(1, -1)
             x_normal = (x_channels_last - sim_left_bounds) / ((n_regions + 1) * region_lengths)
@@ -77,7 +78,7 @@ def pwlu_forward(x: torch.Tensor, points: torch.Tensor, bounds: torch.Tensor, le
     regions = (x_normal.clamp(0, 1.001) * (n_regions + 1)).floor()
 
     # create tensor of PWLU regions into shape (channels, ...) if channelwise else (...)
-    dists = x_normal * (n_regions + 1) - regions
+    dists = (x_normal * (n_regions + 1) - regions) * region_lengths
 
     regions_packed = regions.long()
     if channelwise:
@@ -187,7 +188,6 @@ class PWLUBase(torch.nn.Module, abc.ABC):
         :param n_points: number of points to plot
         :param bound: bound to plot, defaults to self.bound
         '''
-        self.normalize_points()
 
         locs = np.linspace(-bound, bound, n_points)[np.newaxis, np.newaxis, :]
         if self.channelwise:
@@ -247,7 +247,7 @@ class PWLU(PWLUBase):
     '''
     Vanilla implementation of the PWLU.
     The PWLU is initialized as channelwise if n_channels is specified; otherwise, it is layerwise.
-    Other parameters are pased to PWLUBase.
+    Other parameters are passed to PWLUBase.
     '''
 
     def __init__(self,
@@ -269,10 +269,10 @@ class PWLU(PWLUBase):
 
     def set_points(self, init) -> None:
         self._init = init
-        bound = torch.flatten(self._bounds)[0].item()
-        spacing = 2 * bound / (self._n_regions)
+        bound = torch.flatten(self._bounds)[1].item()
+        spacing = 2 * bound / self._n_regions
 
-        bound *= (1 + 2 / self._n_regions)
+        bound += spacing
         locs = torch.linspace(-bound, bound, self._n_points + 2)
         if self.channelwise:
             locs = locs.repeat(self._n_channels, 1)
@@ -281,7 +281,6 @@ class PWLU(PWLUBase):
         self._left_slopes = Parameter((points[..., 1] - points[..., 0]) / spacing)
         self._right_slopes = Parameter((points[..., -1] - points[..., -2]) / spacing)
         self._points = Parameter(points[..., 1:-1])
-        self.normalize_points()
 
     def get_points(self) -> torch.Tensor:
         return self._points
@@ -322,10 +321,10 @@ class RegularizedPWLU(PWLUBase):
 
     def set_points(self, init) -> None:
         self._init = init
-        bound = torch.flatten(self._bounds)[0].item()
-        spacing = 2 * bound / (self._n_regions)
+        bound = torch.flatten(self._bounds)[1].item()
+        spacing = 2 * bound / self._n_regions
 
-        bound *= (1 + 2 / self._n_regions)
+        bound += spacing
         master_locs = torch.linspace(-bound, bound, self._n_points + 2)
         master_locs = master_locs.repeat(self._n_channels, 1)
         points = init(master_locs)
@@ -333,13 +332,8 @@ class RegularizedPWLU(PWLUBase):
         self._left_slopes = Parameter((points[..., 1] - points[..., 0]) / spacing)
         self._right_slopes = Parameter((points[..., -1] - points[..., -2]) / spacing)
         self._master_points = Parameter(points[..., 1:-1])
-
         self._relative_points = Parameter(torch.zeros(self._n_channels, self._n_points))
-        self.normalize_points()
 
-        bound = torch.flatten(self._bounds)[0].item()
-
-        self.normalize_points()
 
 
 def normed_pwlu(pwlu_class: type, *args, norm: nn.Module, norm_args: dict = {}, **kwargs) -> PWLUBase:
