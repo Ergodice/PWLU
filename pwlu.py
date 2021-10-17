@@ -3,7 +3,6 @@ Daniel Monroe, 2021
 Implementation of paper
 "Learning specialized activation functions with the Piecewise Linear Unit"
 https://arxiv.org/pdf/2104.03693.pdf
-
 The implementation is exactly the same as the original
 '''
 
@@ -13,8 +12,9 @@ from torch.nn import Parameter
 import torch.nn as nn
 import abc
 import numpy as np
+import math
 
-__all__ = ['PWLU', 'PWLUBase', 'RegularizedPWLU', 'normed_pwlu']
+__all__ = ['PWLU', 'PWLUBase', 'RegularizedPWLU', 'normed_pwlu', 'DynamicPWLU']
 
 
 def normalize(points: torch.Tensor, fix_std: bool = True) -> None:
@@ -64,13 +64,15 @@ def pwlu_forward(x: torch.Tensor, points: torch.Tensor, bounds: torch.Tensor, le
 
     # values for bounds will be mapped to 0 (sim_left_bound) and 1 (right bound), some will lie outside
     if channelwise:
-        if len(bounds.shape) == 1:
+        if len(region_lengths.shape) == 0:
             x_normal = (x - sim_left_bounds) / ((n_regions + 1) * region_lengths)
-            x_normal.moveaxis(1, 0)
+            x_normal = x_normal.moveaxis(1, 0)
+
         else:
             x_channels_last = x.moveaxis(1, -1)
             x_normal = (x_channels_last - sim_left_bounds) / ((n_regions + 1) * region_lengths)
             x_normal = x_normal.moveaxis(-1, 0)
+
     else:
         x_normal = (x - sim_left_bounds) / ((n_regions + 1) * region_lengths)
 
@@ -78,7 +80,14 @@ def pwlu_forward(x: torch.Tensor, points: torch.Tensor, bounds: torch.Tensor, le
     regions = (x_normal.clamp(0, 1.001) * (n_regions + 1)).floor()
 
     # create tensor of PWLU regions into shape (channels, ...) if channelwise else (...)
-    dists = (x_normal * (n_regions + 1) - regions) * region_lengths
+    dists = (x_normal * (n_regions + 1) - regions)
+
+    if len(region_lengths.shape) == 0:
+        dists *= region_lengths
+    else:
+        dists = dists.moveaxis(0, -1)
+        dists *= region_lengths
+        dists = dists.moveaxis(-1, 0)
 
     regions_packed = regions.long()
     if channelwise:
@@ -108,7 +117,6 @@ def pwlu_forward(x: torch.Tensor, points: torch.Tensor, bounds: torch.Tensor, le
     if qs:  
             assert False, "second order  not implemented"
             q_strengths = torch.gather(4 * self.qs / bound, -1, regions_packed)
-
             if channelwise:
                 q_strengths = q_strengths.reshape(n_channels, h, w, batch_size)
                 q_strengths = q_strengths.moveaxis(-1, 0)
@@ -333,7 +341,6 @@ class RegularizedPWLU(PWLUBase):
         self._right_slopes = Parameter((points[..., -1] - points[..., -2]) / spacing)
         self._master_points = Parameter(points[..., 1:-1])
         self._relative_points = Parameter(torch.zeros(self._n_channels, self._n_points))
-
 
 
 def normed_pwlu(pwlu_class: type, *args, norm: nn.Module, norm_args: dict = {}, **kwargs) -> PWLUBase:
