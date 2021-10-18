@@ -50,25 +50,25 @@ def pwlu_forward(x: torch.Tensor, points: torch.Tensor, left_bounds: torch.Tenso
         diffs = (points - torch.roll(points, 1, dims=-1))[..., 1:]
         diffs = torch.cat([left_diffs.unsqueeze(-1), diffs, right_diffs.unsqueeze(-1)], dim=-1)
 
-    # Create normalized version of x; values for bounds will be mapped to 0 (sim_left_bound) and 1 (right bound)
-    # Some will lie outside
+    # Create normalized version of x; values for bounds will be mapped to 0 (sim_left_bound)
+    # and n_regions + 1 (right bound)Some will lie outside
     sim_left_bounds = left_bounds - region_lengths
     if channelwise:
         if len(region_lengths.shape) == 0:
-            x_normal = (x - sim_left_bounds) / ((n_regions + 1) * region_lengths)
+            x_normal = (x - sim_left_bounds) / region_lengths
             x_normal = x_normal.moveaxis(1, 0)
         else:
             x_channels_last = x.moveaxis(1, -1)
-            x_normal = (x_channels_last - sim_left_bounds) / ((n_regions + 1) * region_lengths)
+            x_normal = (x_channels_last - sim_left_bounds) / region_lengths
             x_normal = x_normal.moveaxis(-1, 0)
     else:
-        x_normal = (x - sim_left_bounds) / ((n_regions + 1) * region_lengths)
+        x_normal = (x - sim_left_bounds) / region_lengths
 
     # Regions are 0, 1... n_regions, n_regions + 1; outermost are out of bounds
-    regions = (x_normal.clamp(0, 1.001) * (n_regions + 1)).long()
+    regions = (x_normal.clamp(0, (n_regions + 1) * 1.001)).long()
 
     # Create tensor of dists from 0 to 1 from left point: shape (channels, ...) if channelwise else (...)
-    dists = (x_normal * (n_regions + 1) - regions)
+    dists = (x_normal - regions)
 
     # Pack regions into form suitable for evaluation
     if channelwise:
