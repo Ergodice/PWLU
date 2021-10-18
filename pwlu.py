@@ -18,7 +18,8 @@ import logging
 __all__ = ['PWLU', 'PWLUBase', 'RegularizedPWLU', 'normed_pwlu']
 
 
-def pwlu_forward(x: torch.Tensor, points: torch.Tensor, left_bounds: torch.Tensor, right_bounds: torch.Tensor, left_diffs: torch.Tensor,
+def pwlu_forward(x: torch.Tensor, points: torch.Tensor, left_bounds: torch.Tensor, right_bounds: torch.Tensor,
+                 left_diffs: torch.Tensor,
                  right_diffs: torch.Tensor, compiled_diffs: torch.Tensor = None,
                  points_is_compiled: bool = False) -> torch.Tensor:
     """
@@ -39,8 +40,8 @@ def pwlu_forward(x: torch.Tensor, points: torch.Tensor, left_bounds: torch.Tenso
 
     # If points are compiled then they contain the simulated left points
     n_points = points.shape[-1] - 1 if points_is_compiled else points.shape[-1]
-
     n_regions = n_points - 1
+
     region_lengths = (right_bounds - left_bounds) / n_regions
 
     # Compute slopes
@@ -52,9 +53,11 @@ def pwlu_forward(x: torch.Tensor, points: torch.Tensor, left_bounds: torch.Tenso
 
     # Create normalized version of x; values for bounds will be mapped to 0 (sim_left_bound)
     # and n_regions + 1 (right bound)Some will lie outside
+
     sim_left_bounds = left_bounds - region_lengths
+
     if channelwise:
-        if len(region_lengths.shape) == 0:
+        if isinstance(region_lengths, float):
             x_normal = (x - sim_left_bounds) / region_lengths
             x_normal = x_normal.moveaxis(1, 0)
         else:
@@ -65,12 +68,14 @@ def pwlu_forward(x: torch.Tensor, points: torch.Tensor, left_bounds: torch.Tenso
         x_normal = (x - sim_left_bounds) / region_lengths
 
     # Regions are 0, 1... n_regions, n_regions + 1; outermost are out of bounds
+
     regions = (x_normal.clamp(0, (n_regions + 1) * 1.001)).long()
 
     # Create tensor of dists from 0 to 1 from left point: shape (channels, ...) if channelwise else (...)
-    dists = (x_normal - regions)
+    dists = x_normal - regions
 
     # Pack regions into form suitable for evaluation
+
     if channelwise:
         regions_packed = regions.reshape(n_channels, -1)
     else:
@@ -93,6 +98,7 @@ def pwlu_forward(x: torch.Tensor, points: torch.Tensor, left_bounds: torch.Tenso
         left_points = left_points.reshape(n_channels, batch_size, *other_dims)
         diffs = diffs.reshape(n_channels, batch_size, *other_dims)
         ret = left_points + dists * diffs
+
         ret = ret.moveaxis(0, 1)
     else:
         left_points = left_points.reshape(x.size())
@@ -139,15 +145,18 @@ class PWLUBase(torch.nn.Module, ABC):
 
         assert hasattr(self, '_n_channels'), 'PWLUBase subclass must set _n_channels before calling super().__init__'
 
-        if self.channelwise and not same_bound:
-            bound = torch.Tensor([[-bound, bound]])
-            bound = bound.repeat(self._n_channels, 1)
+        if learnable_bound:
+
+            if self.channelwise and not same_bound:
+                bound = torch.Tensor([[-bound, bound]])
+                bound = bound.repeat(self._n_channels, 1)
+            else:
+                bound = torch.Tensor([-bound, bound])
+            self._left_bounds = Parameter(bound[..., 0])
+            self._right_bounds = Parameter(bound[..., 1])
         else:
-            bound = torch.Tensor([-bound, bound])
-        self._left_bounds = Parameter(bound[..., 0])
-        self._right_bounds = Parameter(bound[..., 1])
-        self._left_bounds.requires_grad = learnable_bound
-        self._right_bounds.requires_grad = learnable_bound
+            self._left_bounds = -bound
+            self._right_bounds = bound
 
         self._n_regions = n_regions
         self._n_points = n_regions + 1
@@ -199,20 +208,23 @@ class PWLUBase(torch.nn.Module, ABC):
         if self.training and not self._autocompile:
             # Compile as if in training mode
             self._compiled = False
-            return pwlu_forward(norm(x) if norm else x, self.get_points(), self._left_bounds, self._right_bounds, self._left_diffs,
+            return pwlu_forward(norm(x) if norm else x, self.get_points(), self._left_bounds, self._right_bounds,
+                                self._left_diffs,
                                 self._right_diffs)
         else:
             # Compile points and slopes if not compiled, run using compiled form
             if not self._compiled:
                 self.compile_for_eval()
             try:
-                return pwlu_forward(norm(x) if norm else x, self._compiled_points, self._left_bounds, self._right_bounds,
+                return pwlu_forward(norm(x) if norm else x, self._compiled_points, self._left_bounds,
+                                    self._right_bounds,
                                     self._left_diffs, self._right_diffs, self._compiled_diffs,
                                     points_is_compiled=True)
             except RuntimeError:
                 # If the compiled points and slopes are not on the same device as the input
                 self.compile_for_eval()
-                return pwlu_forward(norm(x) if norm else x, self._compiled_points, self._left_bounds, self._right_bounds,
+                return pwlu_forward(norm(x) if norm else x, self._compiled_points, self._left_bounds,
+                                    self._right_bounds,
                                     self._leftdiffs, self._right_diffs, self._compiled_diffs,
                                     points_is_compiled=True)
 
@@ -314,7 +326,8 @@ class PWLU(PWLUBase):
 
     def set_points(self, init) -> None:
         self._init = init
-        bound = torch.flatten(self._right_bounds)[0].item()
+        bound = self._right_bounds if isinstance(self._right_bounds, float) else torch.flatten(self._right_bounds)[
+            0].item()
         spacing = 2 * bound / self._n_regions
 
         bound += spacing
@@ -366,7 +379,8 @@ class RegularizedPWLU(PWLUBase):
 
     def set_points(self, init) -> None:
         self._init = init
-        bound = torch.flatten(self._right_bounds)[0].item()
+        bound = self._right_bounds if isinstance(self._right_bounds, float) else torch.flatten(self._right_bounds)[
+            0].item()
         spacing = 2 * bound / self._n_regions
 
         bound += spacing
@@ -445,4 +459,4 @@ if __name__ == '__main__':
         reg_avg = reg_total / n_reps
 
         logging.info(
-            f'{n_regions=}. Average compiled time: {compile_avg * 10 ** 6:.2f}μs | Average not compiled time: {reg_avg * 10 ** 6:.2f}μs')
+            f'{n_regions=}. Average compiled time: {round(compile_avg * 10 ** 6)}μs | Average not compiled time: {round(reg_avg * 10 ** 6)}μs')
