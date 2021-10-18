@@ -53,29 +53,27 @@ def pwlu_forward(x: torch.Tensor, points: torch.Tensor, left_bounds: torch.Tenso
 
     # Create normalized version of x; values for bounds will be mapped to 0 (sim_left_bound)
     # and n_regions + 1 (right bound)Some will lie outside
-
     sim_left_bounds = left_bounds - region_lengths
-
     if channelwise:
-        if isinstance(region_lengths, float):
-            x_normal = (x - sim_left_bounds) / region_lengths
-            x_normal = x_normal.moveaxis(1, 0)
+        if not isinstance(region_lengths, float):
+            shape = (1, -1) + tuple(1 for _ in other_dims)
+            sim_left_bounds_reshaped = sim_left_bounds.reshape(shape)
+            region_lengths_reshaped = region_lengths.reshape(shape)
         else:
-            x_channels_last = x.moveaxis(1, -1)
-            x_normal = (x_channels_last - sim_left_bounds) / region_lengths
-            x_normal = x_normal.moveaxis(-1, 0)
+            sim_left_bounds_reshaped = sim_left_bounds
+            region_lengths_reshaped = region_lengths
+        x_normal = (x - sim_left_bounds_reshaped) / region_lengths_reshaped
+        x_normal = x_normal.moveaxis(1, 0)
     else:
         x_normal = (x - sim_left_bounds) / region_lengths
 
     # Regions are 0, 1... n_regions, n_regions + 1; outermost are out of bounds
-
     regions = (x_normal.clamp(0, (n_regions + 1) * 1.001)).long()
 
     # Create tensor of dists from 0 to 1 from left point: shape (channels, ...) if channelwise else (...)
     dists = x_normal - regions
 
     # Pack regions into form suitable for evaluation
-
     if channelwise:
         regions_packed = regions.reshape(n_channels, -1)
     else:
@@ -98,7 +96,6 @@ def pwlu_forward(x: torch.Tensor, points: torch.Tensor, left_bounds: torch.Tenso
         left_points = left_points.reshape(n_channels, batch_size, *other_dims)
         diffs = diffs.reshape(n_channels, batch_size, *other_dims)
         ret = left_points + dists * diffs
-
         ret = ret.moveaxis(0, 1)
     else:
         left_points = left_points.reshape(x.size())
@@ -225,7 +222,7 @@ class PWLUBase(torch.nn.Module, ABC):
                 self.compile_for_eval()
                 return pwlu_forward(norm(x) if norm else x, self._compiled_points, self._left_bounds,
                                     self._right_bounds,
-                                    self._leftdiffs, self._right_diffs, self._compiled_diffs,
+                                    self._left_diffs, self._right_diffs, self._compiled_diffs,
                                     points_is_compiled=True)
 
     def __repr__(self):
