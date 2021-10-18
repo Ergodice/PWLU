@@ -18,10 +18,10 @@ import logging
 __all__ = ['PWLU', 'PWLUBase', 'RegularizedPWLU', 'normed_pwlu']
 
 
-def pwlu_forward(x: torch.Tensor, points: torch.Tensor, left_bounds: torch.Tensor, right_bounds: torch.Tensor,
-                 left_diffs: torch.Tensor,
-                 right_diffs: torch.Tensor, compiled_diffs: torch.Tensor = None,
-                 points_is_compiled: bool = False) -> torch.Tensor:
+def _pwlu_forward(x: torch.Tensor, points: torch.Tensor, left_bounds: torch.Tensor, right_bounds: torch.Tensor,
+                  left_diffs: torch.Tensor,
+                  right_diffs: torch.Tensor, compiled_diffs: torch.Tensor = None,
+                  points_is_compiled: bool = False) -> torch.Tensor:
     """
     Apply PWLU activation function to x
     :param x: input
@@ -63,7 +63,6 @@ def pwlu_forward(x: torch.Tensor, points: torch.Tensor, left_bounds: torch.Tenso
             sim_left_bounds_reshaped = sim_left_bounds
             region_lengths_reshaped = region_lengths
         x_normal = (x - sim_left_bounds_reshaped) / region_lengths_reshaped
-        x_normal = x_normal.moveaxis(1, 0)
     else:
         x_normal = (x - sim_left_bounds) / region_lengths
 
@@ -73,30 +72,39 @@ def pwlu_forward(x: torch.Tensor, points: torch.Tensor, left_bounds: torch.Tenso
     # Create tensor of dists from 0 to 1 from left point: shape (channels, ...) if channelwise else (...)
     dists = x_normal - regions
 
-    # Pack regions into form suitable for evaluation
-    if channelwise:
-        regions_packed = regions.reshape(n_channels, -1)
-    else:
-        regions_packed = regions.reshape(-1)
-
     # Create tensors of points including simulated left point
     if points_is_compiled:
         false_points = points
     else:
         false_points = torch.cat([(points[..., 0] - left_diffs).unsqueeze(-1), points], dim=-1)
 
-    # Compute left_points and slope necessary for evaluation
-    left_points = torch.gather(false_points, -1, regions_packed)
+    # Pack regions into form suitable for evaluation
+    if channelwise:
+        regions_packed = regions
+        shape = (1, -1) + tuple(1 for _ in other_dims)
+        offsets = torch.arange(n_channels, dtype=torch.long, device=x.device).reshape(*shape) * (n_points + 1)
+        regions_packed += offsets
 
-    # At this point diffs becomes the gathered diffs
-    diffs = torch.gather(diffs, -1, regions_packed)
+        # Compute left_points and slope necessary for evaluation
+        left_points = torch.take(false_points, regions_packed)
+
+        # At this point diffs becomes the gathered diffs
+        diffs = torch.take(diffs, regions_packed)
+
+    else:
+        regions_packed = regions.reshape(-1)
+
+        # Compute left_points and slope necessary for evaluation
+        left_points = torch.gather(false_points, -1, regions_packed)
+
+        # At this point diffs becomes the gathered diffs
+        diffs = torch.gather(diffs, -1, regions_packed)
 
     # Compute activations
     if channelwise:
-        left_points = left_points.reshape(n_channels, batch_size, *other_dims)
-        diffs = diffs.reshape(n_channels, batch_size, *other_dims)
+        left_points = left_points.reshape(x.size())
+        diffs = diffs.reshape(x.size())
         ret = left_points + dists * diffs
-        ret = ret.moveaxis(0, 1)
     else:
         left_points = left_points.reshape(x.size())
         diffs = diffs.reshape(x.size())
@@ -143,7 +151,6 @@ class PWLUBase(torch.nn.Module, ABC):
         assert hasattr(self, '_n_channels'), 'PWLUBase subclass must set _n_channels before calling super().__init__'
 
         if learnable_bound:
-
             if self.channelwise and not same_bound:
                 bound = torch.Tensor([[-bound, bound]])
                 bound = bound.repeat(self._n_channels, 1)
@@ -167,18 +174,6 @@ class PWLUBase(torch.nn.Module, ABC):
 
         # Create normalization layer
         self._norm = nn.LazyBatchNorm2d(affine=False, **norm_args) if normed else None
-
-    def to(self, *args, **kwargs):
-        self._compiled = False
-        return super().to(*args, **kwargs)
-
-    def cuda(self):
-        self._compiled = False
-        return super().to()
-
-    def cpu(self):
-        self._compiled = False
-        return super().cpu()
 
     def compile_for_eval(self):
         """
@@ -205,25 +200,25 @@ class PWLUBase(torch.nn.Module, ABC):
         if self.training and not self._autocompile:
             # Compile as if in training mode
             self._compiled = False
-            return pwlu_forward(norm(x) if norm else x, self.get_points(), self._left_bounds, self._right_bounds,
-                                self._left_diffs,
-                                self._right_diffs)
+            return _pwlu_forward(norm(x) if norm else x, self.get_points(), self._left_bounds, self._right_bounds,
+                                 self._left_diffs,
+                                 self._right_diffs)
         else:
             # Compile points and slopes if not compiled, run using compiled form
             if not self._compiled:
                 self.compile_for_eval()
             try:
-                return pwlu_forward(norm(x) if norm else x, self._compiled_points, self._left_bounds,
-                                    self._right_bounds,
-                                    self._left_diffs, self._right_diffs, self._compiled_diffs,
-                                    points_is_compiled=True)
+                return _pwlu_forward(norm(x) if norm else x, self._compiled_points, self._left_bounds,
+                                     self._right_bounds,
+                                     self._left_diffs, self._right_diffs, self._compiled_diffs,
+                                     points_is_compiled=True)
             except RuntimeError:
                 # If the compiled points and slopes are not on the same device as the input
                 self.compile_for_eval()
-                return pwlu_forward(norm(x) if norm else x, self._compiled_points, self._left_bounds,
-                                    self._right_bounds,
-                                    self._left_diffs, self._right_diffs, self._compiled_diffs,
-                                    points_is_compiled=True)
+                return _pwlu_forward(norm(x) if norm else x, self._compiled_points, self._left_bounds,
+                                     self._right_bounds,
+                                     self._left_diffs, self._right_diffs, self._compiled_diffs,
+                                     points_is_compiled=True)
 
     def __repr__(self):
         ret = f'{self.__class__}(n_regions={self._n_regions}, bound={self._bounds})'
@@ -404,7 +399,6 @@ def normed_pwlu(pwlu_class: type, *args, norm: nn.Module, norm_args: dict = {}, 
 
 
 if __name__ == '__main__':
-
     logging.getLogger().setLevel(logging.DEBUG)
     args = [
         {'n_channels': 10, 'learnable_bound': True, 'same_bound': True},
@@ -431,15 +425,15 @@ if __name__ == '__main__':
     z = pwlu(x)
     assert torch.allclose(y, z)
 
-    n_reps = 1000
+    n_reps = 200
 
     logging.info(f'Performing compile speed test with {n_reps=}')
     # 96x7x7 is smallest Imagenet layer size
-    for n_regions in (2 ** x for x in range(1, 12)):
+    for n_regions in (2 ** x for x in range(4, 5)):
         compile_total = 0
         pwlu = PWLU(96, n_regions=n_regions, autocompile=True)
         for i in range(n_reps):
-            x = torch.rand(1, 96, 7, 7)
+            x = torch.rand(64, 96, 7, 7)
             start = time.perf_counter()
             y = pwlu(x)
             compile_total += time.perf_counter() - start
@@ -449,7 +443,7 @@ if __name__ == '__main__':
 
         pwlu = PWLU(96, n_regions=n_regions, autocompile=False)
         for i in range(n_reps):
-            x = torch.rand(1, 96, 7, 7)
+            x = torch.rand(64, 96, 7, 7)
             start = time.perf_counter()
             y = pwlu(x)
             reg_total += time.perf_counter() - start
