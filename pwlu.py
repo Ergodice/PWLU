@@ -18,14 +18,15 @@ import logging
 __all__ = ['PWLU', 'PWLUBase', 'RegularizedPWLU', 'normed_pwlu']
 
 
-def pwlu_forward(x: torch.Tensor, points: torch.Tensor, bounds: torch.Tensor, left_diffs: torch.Tensor,
+def pwlu_forward(x: torch.Tensor, points: torch.Tensor, left_bounds: torch.Tensor, right_bounds: torch.Tensor, left_diffs: torch.Tensor,
                  right_diffs: torch.Tensor, compiled_diffs: torch.Tensor = None,
                  points_is_compiled: bool = False) -> torch.Tensor:
     """
     Apply PWLU activation function to x
     :param x: input
     :param points: points to evaluate PWLU at
-    :param bounds: bounds of PWLU
+    :param left_bounds: left bounds of PWLU
+    :param right_bounds: right bounds of PWLU
     :param left_diffs: left diffs of PWLU
     :param right_diffs: right diffs of PWLU
     :param compiled_diffs: compiled diffs of PWLU
@@ -40,8 +41,6 @@ def pwlu_forward(x: torch.Tensor, points: torch.Tensor, bounds: torch.Tensor, le
     n_points = points.shape[-1] - 1 if points_is_compiled else points.shape[-1]
 
     n_regions = n_points - 1
-    left_bounds = bounds[..., 0]
-    right_bounds = bounds[..., 1]
     region_lengths = (right_bounds - left_bounds) / n_regions
 
     # Compute slopes
@@ -145,8 +144,10 @@ class PWLUBase(torch.nn.Module, ABC):
             bound = bound.repeat(self._n_channels, 1)
         else:
             bound = torch.Tensor([-bound, bound])
-        self._bounds = Parameter(bound)
-        self._bounds.requires_grad = learnable_bound
+        self._left_bounds = Parameter(bound[..., 0])
+        self._right_bounds = Parameter(bound[..., 1])
+        self._left_bounds.requires_grad = learnable_bound
+        self._right_bounds.requires_grad = learnable_bound
 
         self._n_regions = n_regions
         self._n_points = n_regions + 1
@@ -198,20 +199,20 @@ class PWLUBase(torch.nn.Module, ABC):
         if self.training and not self._autocompile:
             # Compile as if in training mode
             self._compiled = False
-            return pwlu_forward(norm(x) if norm else x, self.get_points(), self._bounds, self._left_diffs,
+            return pwlu_forward(norm(x) if norm else x, self.get_points(), self._left_bounds, self._right_bounds, self._left_diffs,
                                 self._right_diffs)
         else:
             # Compile points and slopes if not compiled, run using compiled form
             if not self._compiled:
                 self.compile_for_eval()
             try:
-                return pwlu_forward(norm(x) if norm else x, self._compiled_points, self._bounds,
+                return pwlu_forward(norm(x) if norm else x, self._compiled_points, self._left_bounds, self._right_bounds,
                                     self._left_diffs, self._right_diffs, self._compiled_diffs,
                                     points_is_compiled=True)
             except RuntimeError:
                 # If the compiled points and slopes are not on the same device as the input
                 self.compile_for_eval()
-                return pwlu_forward(norm(x) if norm else x, self._compiled_points, self._bounds,
+                return pwlu_forward(norm(x) if norm else x, self._compiled_points, self._left_bounds, self._right_bounds,
                                     self._leftdiffs, self._right_diffs, self._compiled_diffs,
                                     points_is_compiled=True)
 
@@ -313,7 +314,7 @@ class PWLU(PWLUBase):
 
     def set_points(self, init) -> None:
         self._init = init
-        bound = torch.flatten(self._bounds)[1].item()
+        bound = torch.flatten(self._right_bounds)[0].item()
         spacing = 2 * bound / self._n_regions
 
         bound += spacing
@@ -365,7 +366,7 @@ class RegularizedPWLU(PWLUBase):
 
     def set_points(self, init) -> None:
         self._init = init
-        bound = torch.flatten(self._bounds)[1].item()
+        bound = torch.flatten(self._right_bounds)[0].item()
         spacing = 2 * bound / self._n_regions
 
         bound += spacing
