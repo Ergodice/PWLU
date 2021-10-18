@@ -40,7 +40,7 @@ class IdentityActivation(nn.Module):
     """
 
     @staticmethod
-    def forward(self, x):
+    def forward(x):
         return x
 
 
