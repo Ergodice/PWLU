@@ -16,85 +16,6 @@ import logging
 import numbers
 
 
-def _pwlu_forward(x: torch.Tensor, points: torch.Tensor, left_bounds: torch.Tensor, right_bounds: torch.Tensor,
-                  compiled_diffs: torch.Tensor = None) -> torch.Tensor:
-    """
-    Apply PWLU activation function to x
-    :param x: input
-    :param points: points to evaluate PWLU at
-    :param left_bounds: left bounds of PWLU
-    :param right_bounds: right bounds of PWLU
-    :param compiled_diffs: compiled diffs of PWLU
-    """
-    # Initialize variables
-    batch_size, n_channels, *other_dims = x.shape
-    channelwise = len(points.shape) == 2
-
-    # Set parameters
-    n_points = points.shape[-1]
-    n_regions = n_points - 1
-    region_lengths = (right_bounds - left_bounds) / n_regions
-
-    # Compute diffs, used instead of slopes to calculate displacement from left point
-    if compiled_diffs is not None:
-        diffs = compiled_diffs
-    else:
-        diffs = (points - torch.roll(points, 1, dims=-1))[..., 1:]
-
-    # If there is this many points, we are going to gradient smooth
-    if n_points > 100:
-        diffs = diffs.detach()    
-
-    # Create normalized version of x; values for bounds will be mapped to 0 (sim_left_bound)
-    # and n_regions - 1 (right bound )Some will lie outside
-    if channelwise:
-        if not isinstance(region_lengths, numbers.Real):
-            shape = (1, -1) + tuple(1 for _ in other_dims)
-            left_bounds_reshaped = left_bounds.reshape(shape)
-            region_lengths_reshaped = region_lengths.reshape(shape)
-        else:
-            left_bounds_reshaped = left_bounds
-            region_lengths_reshaped = region_lengths
-        x_normal = (x - left_bounds_reshaped) / region_lengths_reshaped
-    else:
-        x_normal = (x - left_bounds) / region_lengths
-
-    # Regions are 0, 1, ..., n_regions - 1; outermost are partially out of bounds
-    regions = (x_normal.clamp(0, n_regions - 1)).long()
-
-    # Create tensor of dists from 0 to 1 from left point: shape (channels, ...) if channelwise else (...)
-    dists = x_normal - regions
-
-    # Pack regions into form suitable for evaluation
-    if channelwise:
-        regions_packed = regions
-        shape = (1, -1) + tuple(1 for _ in other_dims)
-        offsets = torch.arange(n_channels, dtype=torch.long, device=x.device).reshape(*shape) * (n_points - 1)
-        regions_packed += offsets
-
-        # Compute left_points and slope necessary for evaluation
-        left_points = torch.take(points[..., :-1], regions_packed)
-
-        # At this point diffs becomes the gathered diffs
-        diffs = torch.take(diffs, regions_packed)
-
-    else:
-        regions_packed = regions.reshape(-1)
-
-        # Compute left_points and slope necessary for evaluation
-        left_points = torch.gather(points, -1, regions_packed)
-
-        # At this point diffs becomes the gathered diffs
-        diffs = torch.gather(diffs, -1, regions_packed)
-
-    # Compute activations
-    left_points = left_points.reshape(x.size())
-    diffs = diffs.reshape(x.size())
-    ret = left_points + dists * diffs
-
-    return ret
-
-
 class PWLU(torch.nn.Module):
     """
     PWLU class
@@ -167,33 +88,81 @@ class PWLU(torch.nn.Module):
             norm_args = {}
         self._norm = nn.LazyBatchNorm2d(affine=False, **norm_args) if normed else None
 
-    def _compile_for_eval(self):
-        """
-        Compile the points and slopes for evaluation
-        The compiled points includes the effective point left of the left bound
-        """
-        diffs = (self._points - torch.roll(self._points, 1, dims=-1))[..., 1:]
-        self._compiled_diffs = diffs.detach()
-        self._compiled = True
-
     def forward(self, x: torch.Tensor, normed: bool = True):
         """
         Forward function of the BasePWLU
         :param x: input tensor
         :param normed: if true, use self._norm on the input
         """
-        norm = self._norm if normed else None
+        if self._norm is not None:
+           x = self._norm(x)
+
         if self.training or not self._autocompile:
-            # Compile as if in training mode
             self._compiled = False
-            return _pwlu_forward(norm(x) if norm else x, self._points, self._left_bounds, self._right_bounds)
+        
+        # Compute diffs if not compiled
+        if not self._compiled:
+            diffs = (self._points - torch.roll(self._points, 1, dims=-1))[..., 1:]
+            if self._autocompile:
+                self._compiled_diffs = diffs.detach()
+                self._compiled = True
+            # if self._n_points > 100:
+            #     diffs = diffs.detach()    
+        else:
+            diffs = self._compiled_diffs
+
+        batch_size, n_channels, *other_dims = x.shape
+        region_lengths = (self._right_bounds - self._left_bounds) / self._n_regions
+
+        # Create normalized version of x; values for bounds will be mapped to 0 (sim_left_bound)
+        # and n_regions - 1 (right bound) Some will lie outside
+        if self._channelwise:
+            if not isinstance(region_lengths, numbers.Real):
+                shape = (1, -1) + tuple(1 for _ in other_dims)
+                left_bounds_reshaped = self._left_bounds.reshape(shape)
+                region_lengths_reshaped = region_lengths.reshape(shape)
+            else:
+                left_bounds_reshaped = self._left_bounds
+                region_lengths_reshaped = region_lengths
+            x_normal = (x - left_bounds_reshaped) / region_lengths_reshaped
+        else:
+            x_normal = (x - self._left_bounds) / region_lengths
+
+        # Regions are 0, 1, ..., n_regions - 1; outermost are partially out of bounds
+        regions = (x_normal.clamp(0, self._n_regions - 1)).long()
+
+        # Create tensor of dists from 0 to 1 from left point: shape (channels, ...) if channelwise else (...)
+        dists = x_normal - regions
+
+        # Pack regions into form suitable for evaluation
+        if self._channelwise:
+            regions_packed = regions
+            shape = (1, -1) + tuple(1 for _ in other_dims)
+            offsets = torch.arange(n_channels, dtype=torch.long, device=x.device).reshape(*shape) * (self._n_regions)
+            regions_packed += offsets
+
+            # Compute left_points and slope necessary for evaluation
+            left_points = torch.take(self._points[..., :-1], regions_packed)
+
+            # At this point diffs becomes the gathered diffs
+            diffs = torch.take(diffs, regions_packed)
 
         else:
-            # Compile points and slopes if not compiled, run using compiled form
-            if not self._compiled:
-                self._compile_for_eval()
-            return _pwlu_forward(norm(x) if norm else x, self._points, self._left_bounds, self._right_bounds,
-                                 self._compiled_diffs)
+            regions_packed = regions.reshape(-1)
+
+            # Compute left_points and slope necessary for evaluation
+            left_points = torch.gather(self._points, -1, regions_packed)
+
+            # At this point diffs becomes the gathered diffs
+            diffs = torch.gather(diffs, -1, regions_packed)
+
+        # Compute activations
+        left_points = left_points.reshape(x.size())
+        diffs = diffs.reshape(x.size())
+
+        ret = left_points + dists * diffs
+
+        return ret
 
     def __repr__(self):
         ret = f'{self.__class__}(n_regions={self._n_regions}, bound={self._bounds})'
