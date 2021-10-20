@@ -15,8 +15,6 @@ import time
 import logging
 import numbers
 
-__all__ = ['PWLU']
-
 
 def _pwlu_forward(x: torch.Tensor, points: torch.Tensor, left_bounds: torch.Tensor, right_bounds: torch.Tensor,
                   compiled_diffs: torch.Tensor = None) -> torch.Tensor:
@@ -42,6 +40,10 @@ def _pwlu_forward(x: torch.Tensor, points: torch.Tensor, left_bounds: torch.Tens
         diffs = compiled_diffs
     else:
         diffs = (points - torch.roll(points, 1, dims=-1))[..., 1:]
+
+    # If there is this many points, we are going to gradient smooth
+    if n_points > 100:
+        diffs = diffs.detach()    
 
     # Create normalized version of x; values for bounds will be mapped to 0 (sim_left_bound)
     # and n_regions - 1 (right bound )Some will lie outside
