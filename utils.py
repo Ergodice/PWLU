@@ -5,15 +5,44 @@ Useful functions and classes
 
 import torch.nn as nn
 import torch
+from functools import lru_cache
+from math import sqrt
 
 
-def normalize(points: torch.Tensor, fix_std: bool = True) -> None:
+@lru_cache(100)
+def _make_smooth_matrix(size: int, factor: float, device='cpu') -> torch.Tensor:
+    """
+    Cached: make a matrix size x with entries factor**abs(row-column), with rows normalized to have sum 1
+    :param size: size of matrix
+    :param factor: factor to multiply by
+    :param device: device to put matrix on
+    """
+    size_range = torch.arange(size, device=device)
+    matrix = factor ** torch.abs(size_range.view(1, -1) - size_range.view(-1, 1))
+    # Divide each row of matrix by its sum
+    matrix = matrix / torch.sum(matrix, dim=1, keepdim=True)
+    return matrix
+
+
+def make_smooth_matrix(size: int, factor: float, device='cpu') -> torch.Tensor:
+    """
+    Make a matrix size x with entries factor**abs(row-column), with rows normalized to have sum 1
+    :param size: size of matrix
+    :param factor: factor to multiply by
+    :param device: device to put matrix on
+    """
+    return _make_smooth_matrix(size, round(factor, 2), device)
+
+
+def normalize(points: torch.Tensor, fix_std: bool = True) -> float:
     """
     Normalize points to have mean 0 and std 1
     :param points: points to normalize
     :param fix_std: if true, will normalize to have std 1, default true
     """
+
     with torch.no_grad():
+        start_var = torch.var(points).item()
         if len(points.shape) == 2:
             if fix_std:
                 nn.functional.normalize(points, out=points)
@@ -22,6 +51,10 @@ def normalize(points: torch.Tensor, fix_std: bool = True) -> None:
             if fix_std:
                 nn.functional.normalize(points, dim=0, out=points)
             points -= torch.mean(points)
+        end_var = torch.var(points).item()
+    if start_var < 10 ** -4:
+        return 1
+    return sqrt(start_var / end_var)
 
 
 class SquareActivation(nn.Module):
@@ -81,3 +114,7 @@ def get_activation(activation):
             activation = activation()
 
         return activation
+
+
+if __name__ == '__main__':
+    print(make_smooth_matrix(5, .5))
