@@ -26,7 +26,7 @@ class PWLU(torch.nn.Module):
 
     def __init__(self,
                  n_channels: int = None,
-                 n_regions: int = 128,
+                 n_regions: int = 127,
                  bound: float = 2.5,
                  learnable_bound: bool = False,
                  same_bound: bool = False,
@@ -188,24 +188,9 @@ class PWLU(torch.nn.Module):
         locs = locs.cpu().numpy()
         return locs.squeeze(), vals.squeeze()
 
-    def _smooth_gradient(self, factor: int) -> None:
-        assert isinstance(self._left_bounds, numbers.Real), 'Bound must be constant to smooth gradients'
-        if self._points.grad is None:
-            return
-
-
-
-        # Scale gradient by portion of entries in each region, assumes left bound is negative right bound
-        #portions = torch.exp(torch.linspace(-self._left_bounds, self._right_bounds, self._n_points, device=self._points.device) ** 2 / 2)
-        #self._points.grad.data /= portions
-
-        # Smooth gradients by factor
-        self._points.grad.data = smooth_points(self._points.grad.data, factor)
-
     def normalize_points(self) -> None:
         normalize(self._points)
 
-    def get_regularization_loss(self):
         if self.n_regions < 12:
             return 0
         diffs = (self._points - torch.roll(self._points, 1, dims=-1))[..., 1:]
@@ -214,8 +199,17 @@ class PWLU(torch.nn.Module):
         if self._channelwise:
             loss /= self.n_channels 
         return loss
-        
+    
+    def spread_gradient(self) -> None:
+        """
+        Spread gradient from left side to right side 
+        """
+        shifted_grad = torch.roll(self._points.grad.data, 1, dims=-1)
+        shifted_grad[..., 0] = 0
+        self._points.grad.data += shifted_grad
 
+    def approximate_with_quadratic(self, n: int) -> None:
+        approximate_quadratic_piecewise(self._points.grad.data, n)
 
     @property
     def n_channels(self) -> int:

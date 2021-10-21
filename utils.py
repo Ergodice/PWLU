@@ -46,9 +46,41 @@ def calculate_abcs(points: torch.Tensor):
         bottom = torch.einsum('ij -> i', points)
         vectors = torch.stack([top, middle, bottom], dim=1)
         inverse_matrix = make_inverse_matrix(n, points.device)
-    return inverse_matrix @ vectors.transpose(0, 1)
+        ret = inverse_matrix @ vectors.transpose(0, 1)
+    return ret
 
-    
+def approximate_quadratic(points: torch.Tensor):
+    """
+    Approximate points with a quadratic function
+    :param points: points to approximate
+    """
+    if len(points.shape) == 1:
+        points = points.unsqueeze(0)
+    n_points = points.shape[-1]
+    a, b, c = calculate_abcs(points)
+    arange = torch.arange(n_points)
+    return a * arange ** 2 + b * arange + c
+
+def approximate_quadratic_piecewise(points: torch.Tensor, n: int):
+    """
+    Replace every n points with a quadratic approximation of those points
+    :param points points to approximate
+    :param n number of pointss to take at a time
+    """
+
+    # TODO: Allow n to be any number >=3 (don't need n_points % n >=3 )
+    assert n >= 3, 'n must be at least 3 to approximate'
+
+    if len(points.shape) == 1:
+        points = points.unsqueeze(0)
+    n_points = points.shape[-1]
+    start = 0
+
+    while start < n_points:
+        with torch.no_grad():
+            end = min(start + n, n_points)
+            points[..., start:end] = approximate_quadratic(points[..., start:end])
+            start = end
 
 
 def normalize(points: torch.Tensor, fix_std: bool = True) -> float:
@@ -129,7 +161,7 @@ def get_activation(activation):
         return activation
 
 
-
 if __name__ == '__main__':
-    values = torch.arange(3, dtype=torch.float) + torch.arange(3, dtype=torch.float) ** 2
-    print(calculate_abcs(values))
+    values = torch.arange(5, dtype=torch.float) + torch.arange(5, dtype=torch.float) ** 2
+    approximate_quadratic_piecewise(values, 5)
+    print(values)

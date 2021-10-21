@@ -160,13 +160,15 @@ def train(epochs, max_lr, model, train_loader, val_loader,
                     nn.utils.clip_grad_value_(model.parameters(), grad_clip)
 
             closure()
-
             for pwlu in pwlus:
-                pwlu._smooth_gradient(25)
+                pwlu.spread_gradient()
 
             # Step
             optimizer.step()
             optimizer.zero_grad()
+            for pwlu in pwlus:
+                pwlu.approximate_with_quadratic(16)
+
             batch_num += 1
             sched.step()
 
