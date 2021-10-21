@@ -26,8 +26,8 @@ class PWLU(torch.nn.Module):
 
     def __init__(self,
                  n_channels: int = None,
-                 n_regions: int = 6,
-                 bound: float = 2.7,
+                 n_regions: int = 128,
+                 bound: float = 2.5,
                  learnable_bound: bool = False,
                  same_bound: bool = False,
                  init='relu',
@@ -78,7 +78,7 @@ class PWLU(torch.nn.Module):
             self._left_bounds = -bound
             self._right_bounds = bound
 
-        # Compile settings
+        # Set compilation settings
         self._autocompile = autocompile
         self._compiled_diffs = None
         self._compiled = False
@@ -94,26 +94,27 @@ class PWLU(torch.nn.Module):
         :param x: input tensor
         :param normed: if true, use self._norm on the input
         """
-        if self._norm is not None:
+        
+        if self._norm is not None and normed:
            x = self._norm(x)
 
         if self.training or not self._autocompile:
             self._compiled = False
         
         # Compute diffs if not compiled
-        if not self._compiled:
+        if self._compiled:
+            diffs = self._compiled_diffs  
+        else:
             diffs = (self._points - torch.roll(self._points, 1, dims=-1))[..., 1:]
             if self._autocompile:
                 self._compiled_diffs = diffs.detach()
                 self._compiled = True
-            # if self._n_points > 100:
-            #     diffs = diffs.detach()    
-        else:
-            diffs = self._compiled_diffs
-
+            if self._n_points > 100:
+               diffs = diffs.detach()  
+        
         batch_size, n_channels, *other_dims = x.shape
         region_lengths = (self._right_bounds - self._left_bounds) / self._n_regions
-
+        
         # Create normalized version of x; values for bounds will be mapped to 0 (sim_left_bound)
         # and n_regions - 1 (right bound) Some will lie outside
         if self._channelwise:
@@ -156,13 +157,11 @@ class PWLU(torch.nn.Module):
             # At this point diffs becomes the gathered diffs
             diffs = torch.gather(diffs, -1, regions_packed)
 
-        # Compute activations
+        # Compute and return activations
         left_points = left_points.reshape(x.size())
         diffs = diffs.reshape(x.size())
+        return left_points + dists * diffs
 
-        ret = left_points + dists * diffs
-
-        return ret
 
     def __repr__(self):
         ret = f'{self.__class__}(n_regions={self._n_regions}, bound={self._bounds})'
@@ -189,21 +188,34 @@ class PWLU(torch.nn.Module):
         locs = locs.cpu().numpy()
         return locs.squeeze(), vals.squeeze()
 
-    def _smooth_gradient(self, factor: float) -> None:
+    def _smooth_gradient(self, factor: int) -> None:
         assert isinstance(self._left_bounds, numbers.Real), 'Bound must be constant to smooth gradients'
         if self._points.grad is None:
             return
+
+
 
         # Scale gradient by portion of entries in each region, assumes left bound is negative right bound
         #portions = torch.exp(torch.linspace(-self._left_bounds, self._right_bounds, self._n_points, device=self._points.device) ** 2 / 2)
         #self._points.grad.data /= portions
 
         # Smooth gradients by factor
-        smooth_matrix = make_smooth_matrix(self._n_points, factor, device=self._points.device)
-        self._points.grad.data = self._points.grad.data @ smooth_matrix
+        self._points.grad.data = smooth_points(self._points.grad.data, factor)
 
     def normalize_points(self) -> None:
         normalize(self._points)
+
+    def get_regularization_loss(self):
+        if self.n_regions < 12:
+            return 0
+        diffs = (self._points - torch.roll(self._points, 1, dims=-1))[..., 1:]
+        diffs = (diffs - torch.roll(diffs, 1, dims=-1))[..., 1::2]
+        loss = torch.sum(diffs ** 2) * self.n_regions * 0.02
+        if self._channelwise:
+            loss /= self.n_channels 
+        return loss
+        
+
 
     @property
     def n_channels(self) -> int:
@@ -283,7 +295,7 @@ if __name__ == '__main__':
     logging.info(f'Performing n_regions speed test with {n_reps=}')
     # 96x7x7 is smallest Imagenet layer size
     many_regions_total = 0
-    pwlu = PWLU(96, n_regions=1000)
+    pwlu = PWLU(96, n_regions=500)
     pwlu.training = True
     for i in range(n_reps):
         x = torch.rand(64, 96, 7, 7)
@@ -294,7 +306,7 @@ if __name__ == '__main__':
     many_regions_avg = many_regions_total / n_reps
 
     few_regions_total = 0
-    pwlu = PWLU(96, n_regions=4)
+    pwlu = PWLU(96, n_regions=256)
     pwlu.training = True
     for i in range(n_reps):
         x = torch.rand(64, 96, 7, 7)

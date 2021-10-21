@@ -145,7 +145,6 @@ class SquareResBlock(nn.Module):
         super().__init__()
         self.conv1 = conv3(channels, channels, activation='square')
         self.conv2 = conv3(channels, channels, activation=None, bn_zeros=True)
-
         self.bn = nn.BatchNorm2d(channels)
         self.activation = get_activation('relu')
 
@@ -165,7 +164,7 @@ class TestBlock(nn.Module):
         :param use_square: if True, use square activation function
         '''
         super().__init__()
-        self.conv1 = conv1(channels, channels, activation=PWLU(channels, normed=True, n_regions=6, init='relu'))
+        self.conv1 = conv1(channels, channels, activation=PWLU(channels, normed=True))
 
         self.bn = nn.BatchNorm2d(channels)
         self.activation = get_activation('relu')

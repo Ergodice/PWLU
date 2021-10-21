@@ -148,9 +148,9 @@ def train(epochs, max_lr, model, train_loader, val_loader,
 
         for batch in train_loader:
             if batch_num % 3 == 0:
-                for module in model.modules():
-                    if isinstance(module, PWLU):
-                        module.normalize_points()
+                for pwlu in pwlus:
+                    pwlu.normalize_points()
+            
 
             def closure():
                 loss = model.training_step(batch)
@@ -162,8 +162,7 @@ def train(epochs, max_lr, model, train_loader, val_loader,
             closure()
 
             for pwlu in pwlus:
-                if pwlu.points.grad is not None:
-                    pwlu._smooth_gradient(.1)
+                pwlu._smooth_gradient(25)
 
             # Step
             optimizer.step()
@@ -207,7 +206,7 @@ if __name__ == '__main__':
     evaluate(model, tst_dl)
     writer = tfsummary.create_file_writer(get_logdir())
     summary(model, (3, 32, 32), batch_size=batch_size)
-    epochs = 30
+    epochs = 20
     max_lr = 0.001
     grad_clip = 0.1
     weight_decay = 1e-4
@@ -219,7 +218,7 @@ if __name__ == '__main__':
     print(history)
 
     history += train(epochs, max_lr, model, trn_dl, tst_dl, grad_clip=grad_clip, weight_decay=weight_decay,
-                     opt_func=optimizer)
+                     opt_func=optimizer, betas=(0.9, 0.999))
 
     print('Finished')
 

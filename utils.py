@@ -5,33 +5,50 @@ Useful functions and classes
 
 import torch.nn as nn
 import torch
-from functools import lru_cache
-from math import sqrt
+import functools
 
 
-@lru_cache(100)
-def _make_smooth_matrix(size: int, factor: float, device='cpu') -> torch.Tensor:
+@functools.lru_cache(128)
+def make_inverse_matrix(n: int, device = 'cpu'):
     """
-    Cached: make a matrix size x with entries factor**abs(row-column), with rows normalized to have sum 1
-    :param size: size of matrix
-    :param factor: factor to multiply by
-    :param device: device to put matrix on
+    Makes matrix used to optimize quadratic approximator
+    :param n: number of points
+    :param device: device to use
     """
-    size_range = torch.arange(size, device=device)
-    matrix = factor ** torch.abs(size_range.view(1, -1) - size_range.view(-1, 1))
-    # Divide each row of matrix by its sum
-    matrix = matrix / torch.sum(matrix, dim=1, keepdim=True)
-    return matrix
 
+    # Calculate sums of nth powers from 0 to n-1
+    s4 = n * (n - 1) * (2 * n - 1) * (3 * n**2 - 3*n - 1) / 30
+    s3 = (n-1) ** 2 * n**2 / 4
+    s2 = n * (n - 1) * (2 * n - 1) / 6
+    s1 = n * (n - 1) / 2
 
-def make_smooth_matrix(size: int, factor: float, device='cpu') -> torch.Tensor:
+    # Make matrix
+    matrix_elements = [[s4, s3, s2],
+                       [s3, s2, s1],
+                       [s2, s1, n]]
+    matrix = torch.tensor(matrix_elements, dtype=torch.float, device=device)
+    return torch.linalg.inv(matrix)
+
+def calculate_abcs(points: torch.Tensor):
     """
-    Make a matrix size x with entries factor**abs(row-column), with rows normalized to have sum 1
-    :param size: size of matrix
-    :param factor: factor to multiply by
-    :param device: device to put matrix on
+    Calculate a, b, c for quadratic approximation
+    Acceptable explanation given here: https://www.tutorialspoint.com/statistics/quadratic_regression_equation.htm
+    :param points: points to calculate on
     """
-    return _make_smooth_matrix(size, round(factor, 2), device)
+    with torch.no_grad():
+        if len(points.shape) == 1:
+            points = points.unsqueeze(0)
+        n = points.shape[-1]
+        arange = torch.arange(n, device=points.device, dtype=torch.float)
+        arange_squared = arange ** 2
+        top = torch.einsum('ij, j -> i', points, arange_squared)
+        middle = torch.einsum('ij, j -> i', points, arange)
+        bottom = torch.einsum('ij -> i', points)
+        vectors = torch.stack([top, middle, bottom], dim=1)
+        inverse_matrix = make_inverse_matrix(n, points.device)
+    return inverse_matrix @ vectors.transpose(0, 1)
+
+    
 
 
 def normalize(points: torch.Tensor, fix_std: bool = True) -> float:
@@ -44,17 +61,13 @@ def normalize(points: torch.Tensor, fix_std: bool = True) -> float:
     with torch.no_grad():
         start_var = torch.var(points).item()
         if len(points.shape) == 2:
+            points -= torch.mean(points, dim=1, keepdim=True)
             if fix_std:
                 nn.functional.normalize(points, out=points)
-            points -= torch.mean(points, dim=1, keepdim=True)
         else:
+            points -= torch.mean(points)
             if fix_std:
                 nn.functional.normalize(points, dim=0, out=points)
-            points -= torch.mean(points)
-        end_var = torch.var(points).item()
-    if start_var < 10 ** -4:
-        return 1
-    return sqrt(start_var / end_var)
 
 
 class SquareActivation(nn.Module):
@@ -116,5 +129,7 @@ def get_activation(activation):
         return activation
 
 
+
 if __name__ == '__main__':
-    print(make_smooth_matrix(5, .5))
+    values = torch.arange(3, dtype=torch.float) + torch.arange(3, dtype=torch.float) ** 2
+    print(calculate_abcs(values))
